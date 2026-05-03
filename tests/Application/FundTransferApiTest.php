@@ -24,6 +24,17 @@ final class FundTransferApiTest extends ApiApplicationTestCase
         self::assertSame('ok', $data['status']);
     }
 
+    public function testMeReflectsAnonymousWhenAllowAnonymous(): void
+    {
+        $client = static::createApiClient();
+        $client->request('GET', '/api/me');
+
+        self::assertResponseIsSuccessful();
+        $data = json_decode($client->getResponse()->getContent(), true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('anonymous', $data['subject']);
+        self::assertContains('ROLE_TRANSFER', $data['roles']);
+    }
+
     public function testTransferMovesFunds(): void
     {
         $client = static::createApiClient();
@@ -102,6 +113,46 @@ final class FundTransferApiTest extends ApiApplicationTestCase
         $client->request('GET', '/api/accounts/'.$fromId);
         $bal = json_decode($client->getResponse()->getContent(), true, 512, JSON_THROW_ON_ERROR);
         self::assertSame('9900', $bal['balanceMinor']);
+    }
+
+    public function testIdempotencyKeyMismatchedBodyReturnsConflict(): void
+    {
+        $client = static::createApiClient();
+        [$fromId, $toId] = $this->seedTwoAccounts($client, '10000', '100');
+
+        $idem = 'idem-mismatch-'.Uuid::v4()->toRfc4122();
+        $headers = [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_IDEMPOTENCY_KEY' => $idem,
+        ];
+
+        $client->request(
+            'POST',
+            '/api/transfers',
+            server: $headers,
+            content: json_encode([
+                'fromAccountId' => $fromId,
+                'toAccountId' => $toId,
+                'amountMinor' => '100',
+            ], JSON_THROW_ON_ERROR),
+        );
+        self::assertResponseStatusCodeSame(Response::HTTP_CREATED);
+
+        $client->request(
+            'POST',
+            '/api/transfers',
+            server: $headers,
+            content: json_encode([
+                'fromAccountId' => $fromId,
+                'toAccountId' => $toId,
+                'amountMinor' => '200',
+            ], JSON_THROW_ON_ERROR),
+        );
+        self::assertResponseStatusCodeSame(Response::HTTP_CONFLICT);
+
+        $client->request('GET', '/api/accounts/'.$fromId);
+        $bal = json_decode($client->getResponse()->getContent(), true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('9900', $bal['balanceMinor'], 'Original transfer amount must remain applied once');
     }
 
     public function testGetAccountNotFound(): void
@@ -249,11 +300,16 @@ final class FundTransferApiTest extends ApiApplicationTestCase
         $client = static::createApiClient();
         $client->setServerParameter('REMOTE_ADDR', '198.51.100.123');
         $server = ['CONTENT_TYPE' => 'application/json'];
+        $budgetBody = json_encode([
+            'fromAccountId' => Uuid::v4()->toRfc4122(),
+            'toAccountId' => Uuid::v4()->toRfc4122(),
+            'amountMinor' => '1',
+        ], JSON_THROW_ON_ERROR);
         for ($i = 0; $i < $limit; ++$i) {
-            $client->request('POST', '/api/transfers', server: $server, content: '');
+            $client->request('POST', '/api/transfers', server: $server, content: $budgetBody);
             self::assertNotSame(Response::HTTP_TOO_MANY_REQUESTS, $client->getResponse()->getStatusCode(), 'iteration '.$i);
         }
-        $client->request('POST', '/api/transfers', server: $server, content: '');
+        $client->request('POST', '/api/transfers', server: $server, content: $budgetBody);
         self::assertResponseStatusCodeSame(Response::HTTP_TOO_MANY_REQUESTS);
         self::assertResponseHasHeader('Retry-After');
     }
@@ -265,19 +321,23 @@ final class FundTransferApiTest extends ApiApplicationTestCase
         $client = static::createApiClient();
         $client->setServerParameter('REMOTE_ADDR', '203.0.113.91');
         $exhaust = ['CONTENT_TYPE' => 'application/json'];
+        $budgetBody = json_encode([
+            'fromAccountId' => Uuid::v4()->toRfc4122(),
+            'toAccountId' => Uuid::v4()->toRfc4122(),
+            'amountMinor' => '1',
+        ], JSON_THROW_ON_ERROR);
         for ($i = 0; $i < $limit; ++$i) {
-            $client->request('POST', '/api/transfers', server: $exhaust, content: '');
+            $client->request('POST', '/api/transfers', server: $exhaust, content: $budgetBody);
         }
-        $client->request('POST', '/api/transfers', server: $exhaust, content: '');
+        $client->request('POST', '/api/transfers', server: $exhaust, content: $budgetBody);
         self::assertResponseStatusCodeSame(Response::HTTP_TOO_MANY_REQUESTS);
 
         $client->setServerParameter('REMOTE_ADDR', '203.0.113.92');
         $freshIp = ['CONTENT_TYPE' => 'application/json'];
-        $client->request('POST', '/api/transfers', server: $freshIp, content: '');
-        self::assertResponseStatusCodeSame(Response::HTTP_BAD_REQUEST);
+        $client->request('POST', '/api/transfers', server: $freshIp, content: $budgetBody);
+        self::assertResponseStatusCodeSame(Response::HTTP_NOT_FOUND);
         $payload = json_decode($client->getResponse()->getContent(), true, 512, JSON_THROW_ON_ERROR);
         self::assertArrayHasKey('error', $payload);
-        self::assertSame('Empty body', $payload['error']);
     }
 
     public function testManySequentialTransfersPreserveTotalBalance(): void
@@ -316,10 +376,15 @@ final class FundTransferApiTest extends ApiApplicationTestCase
         $client = static::createApiClient();
         $client->setServerParameter('REMOTE_ADDR', '198.51.100.201');
         $server = ['CONTENT_TYPE' => 'application/json'];
+        $budgetBody = json_encode([
+            'fromAccountId' => Uuid::v4()->toRfc4122(),
+            'toAccountId' => Uuid::v4()->toRfc4122(),
+            'amountMinor' => '1',
+        ], JSON_THROW_ON_ERROR);
         for ($i = 0; $i < $limit; ++$i) {
-            $client->request('POST', '/api/transfers', server: $server, content: '');
+            $client->request('POST', '/api/transfers', server: $server, content: $budgetBody);
         }
-        $client->request('POST', '/api/transfers', server: $server, content: '');
+        $client->request('POST', '/api/transfers', server: $server, content: $budgetBody);
         self::assertResponseStatusCodeSame(Response::HTTP_TOO_MANY_REQUESTS);
 
         $client->request('GET', '/api/health');

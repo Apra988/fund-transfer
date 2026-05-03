@@ -1,0 +1,262 @@
+{
+  "info": {
+    "_postman_id": "a8f7c9e3-fund-transfer-api-demo",
+    "name": "Fund Transfer API (demo)",
+    "description": "## Fund Transfer API — Postman demo\n\n**Important:** **`jwtToken`** must be the **signed JWT string** printed by **`php bin/console app:security:issue-token SOME_SUB`** — NOT the 32-character server secret.\nThe secret belongs only in **`.env.local`** as **`JWT_SECRET_KEY`**.\n\n1. Run the app (`php -S 127.0.0.1:8000 -t public` or Symfony CLI).\n2. Migrate and seed demo accounts (`doctrine:migrations:migrate`, `app:seed-demo-accounts`).\n3. Set variables **fromAccountId** and **toAccountId** from the seed output.\n4. Use **GET /api/me** to see **`subject`** (`anonymous` vs JWT `sub`). Set **`PUBLIC_API_ALLOW_ANONYMOUS=0`** to require a token on protected routes.\n\nOptional: **apiKey** for `X-API-Key`.\n\nFile: `postman/Fund-Transfer-API.demo.postman_collection.json`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "fromAccountId", "value": "REPLACE_AFTER_SEED_DEMO_ACCOUNTS_FROM_UUID" },
+    { "key": "toAccountId", "value": "REPLACE_AFTER_SEED_DEMO_ACCOUNTS_TO_UUID" },
+    { "key": "jwtToken", "value": "" },
+    { "key": "apiKey", "value": "" },
+    { "key": "idempotencyDemoKey", "value": "postman-demo-idem-001" },
+    { "key": "idempotencyConflictKey", "value": "postman-demo-conflict-001" }
+  ],
+  "item": [
+    {
+      "name": "Anonymous / dev (no Bearer)",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/health",
+            "description": "Liveness probe — returns JSON with `status: ok`."
+          },
+          "response": []
+        },
+        {
+          "name": "Who am I (GET /api/me)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/me",
+            "description": "With default **PUBLIC_API_ALLOW_ANONYMOUS=1**, expect **`{\"subject\":\"anonymous\",...}`** even with no Bearer. After you mint a JWT, this folder does not auto-send it — use **With JWT Bearer → Who am I** to see your **`sub`**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get account balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/accounts/{{fromAccountId}}",
+            "description": "Reads `balanceMinor` (string integer minor units)."
+          },
+          "response": []
+        },
+        {
+          "name": "Create transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"500\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "**201** Created with `transferId`, `fromAccountId`, `toAccountId`, `amountMinor`, `createdAt`."
+          },
+          "response": []
+        },
+        {
+          "name": "Create transfer (idempotent replay)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyDemoKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"50\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "Run **twice** with the **same** body and key — second call returns the **same** `transferId` (no double debit). Uses variable `idempotencyDemoKey`."
+          },
+          "response": []
+        },
+        {
+          "name": "Create transfer — prime Idempotency-Key conflict demo (amount 1)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyConflictKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"1\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "Run **once** before the next request. Uses **idempotencyConflictKey**. Expect **201**."
+          },
+          "response": []
+        },
+        {
+          "name": "Create transfer — Idempotency-Key reused with DIFFERENT body (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyConflictKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"999\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "Run **after** the prime request. Same **idempotencyConflictKey** but larger amount → **409 Conflict**. Change variable **idempotencyConflictKey** to repeat this flow."
+          },
+          "response": []
+        },
+        {
+          "name": "Insufficient funds example",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"999999999999999\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "**422** when amount exceeds sender balance."
+          },
+          "response": []
+        },
+        {
+          "name": "Validation error (same account)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{fromAccountId}}\",\n  \"amountMinor\": \"1\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "**400** — from and to must differ."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "With JWT Bearer",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{jwtToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Health (still public)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/health",
+            "description": "Inherited JWT disabled — health stays public."
+          },
+          "response": []
+        },
+        {
+          "name": "Who am I (JWT sub)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/me",
+            "description": "Set **jwtToken** to the output of **`app:security:issue-token my-demo-sub`**. Expect **`subject\": \"my-demo-sub\"`** (your `sub` claim). Leave **jwtToken** empty and set **PUBLIC_API_ALLOW_ANONYMOUS=0** to get **401**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get account balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/accounts/{{fromAccountId}}",
+            "description": "Requires valid JWT when **`JWT_SECRET_KEY`** is set and **`PUBLIC_API_ALLOW_ANONYMOUS=0`**."
+          },
+          "response": []
+        },
+        {
+          "name": "Create transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"100\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "Idempotency owner is scoped to JWT **`sub`** — two different subjects may reuse the same visible `Idempotency-Key`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "With X-API-Key (no Bearer)",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "Who am I (API key client)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/me",
+            "description": "Set **`apiKey`** (collection Variables) to the **exact** same string as server **`API_KEY`** in `.env.local`. Expect **`subject\": \"api-key-client\"** and **200**."
+          },
+          "response": []
+        },
+        {
+          "name": "Get account balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/accounts/{{fromAccountId}}",
+            "description": "Set **`apiKey`** in collection variables when `API_KEY` is configured."
+          },
+          "response": []
+        },
+        {
+          "name": "Create transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fromAccountId\": \"{{fromAccountId}}\",\n  \"toAccountId\": \"{{toAccountId}}\",\n  \"amountMinor\": \"25\"\n}"
+            },
+            "url": "{{baseUrl}}/api/transfers",
+            "description": "Alternative to JWT."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

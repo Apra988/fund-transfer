@@ -6,6 +6,7 @@ namespace App\EventSubscriber;
 
 use App\Exception\AccountNotFoundException;
 use App\Exception\InsufficientFundsException;
+use App\Exception\IdempotencyKeyMismatchException;
 use App\Exception\InvalidTransferException;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -60,11 +61,18 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
             return;
         }
 
-        if ($throwable instanceof \DomainException) {
+        if ($throwable instanceof IdempotencyKeyMismatchException) {
             $event->setResponse(new JsonResponse(
                 ['error' => $throwable->getMessage()],
-                Response::HTTP_BAD_REQUEST,
+                Response::HTTP_CONFLICT,
             ));
+
+            return;
         }
+
+        $event->setResponse(new JsonResponse(
+            ['error' => 'Internal server error'],
+            Response::HTTP_INTERNAL_SERVER_ERROR,
+        ));
     }
 }

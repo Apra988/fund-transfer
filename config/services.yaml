@@ -6,6 +6,9 @@
 parameters:
     # Default when API_KEY is not set in the real environment (dev).
     env(API_KEY): ''
+    env(JWT_SECRET_KEY): ''
+    # When true, unauthenticated requests still hit /api if JWT_SECRET_KEY and API_KEY are both empty OR as a temporary escape hatch (keep false in hardened prod).
+    env(PUBLIC_API_ALLOW_ANONYMOUS): '1'
 
 services:
     # default configuration for services in *this* file
@@ -22,9 +25,15 @@ services:
             - '../src/Entity/'
             - '../src/Kernel.php'
 
-    App\EventSubscriber\ApiKeySubscriber:
+    App\Security\ApiTokenAuthenticator:
         arguments:
-            $apiKey: '%env(API_KEY)%'
+            $jwtSecretKey: '%env(string:JWT_SECRET_KEY)%'
+            $apiKey: '%env(string:API_KEY)%'
+            $publicApiAllowAnonymous: '%env(bool:PUBLIC_API_ALLOW_ANONYMOUS)%'
 
-    # add more service definitions when explicit configuration is needed
+    App\Command\IssueJwtTokenCommand:
+        arguments:
+            $jwtSecretKey: '%env(string:JWT_SECRET_KEY)%'
+
+    # add more service definitions for explicit configuration when needed
     # please note that last definitions always *replace* previous ones

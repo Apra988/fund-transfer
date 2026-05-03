@@ -15,6 +15,7 @@ use Symfony\Component\RateLimiter\RateLimiterFactory;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Serializer\Exception\NotEncodableValueException;
 use Symfony\Component\Serializer\SerializerInterface;
+use Symfony\Bundle\SecurityBundle\Security;
 use Symfony\Component\Validator\Validator\ValidatorInterface;
 
 final class TransferController
@@ -23,6 +24,7 @@ final class TransferController
         private FundTransferService $fundTransferService,
         private ValidatorInterface $validator,
         private SerializerInterface $serializer,
+        private Security $security,
         #[Autowire(service: 'limiter.transfer_write')]
         private RateLimiterFactory $transferLimiter,
     ) {
@@ -31,11 +33,6 @@ final class TransferController
     #[Route('/api/transfers', name: 'api_transfer_create', methods: ['POST'])]
     public function create(Request $request): JsonResponse
     {
-        $limiter = $this->transferLimiter->create($request->getClientIp() ?? 'anon');
-        if (false === $limiter->consume(1)->isAccepted()) {
-            throw new TooManyRequestsHttpException(retryAfter: 60);
-        }
-
         $content = $request->getContent();
         if ('' === $content) {
             return new JsonResponse(['error' => 'Empty body'], Response::HTTP_BAD_REQUEST);
@@ -57,16 +54,25 @@ final class TransferController
             return new JsonResponse(['errors' => $errors], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
+        $limiter = $this->transferLimiter->create($request->getClientIp() ?? 'anon');
+        if (false === $limiter->consume(1)->isAccepted()) {
+            throw new TooManyRequestsHttpException(retryAfter: 60);
+        }
+
         $idempotencyKey = $request->headers->get('Idempotency-Key');
         if (null !== $idempotencyKey && strlen($idempotencyKey) > 255) {
             return new JsonResponse(['error' => 'Idempotency-Key too long'], Response::HTTP_BAD_REQUEST);
         }
+
+        $user = $this->security->getUser();
+        $idempotencyOwner = null !== $user ? $user->getUserIdentifier() : 'anonymous';
 
         $result = $this->fundTransferService->transfer(
             $dto->fromAccountId,
             $dto->toAccountId,
             $dto->amountMinor,
             $idempotencyKey,
+            $idempotencyOwner,
         );
 
         return new JsonResponse($result->toArray(), Response::HTTP_CREATED);

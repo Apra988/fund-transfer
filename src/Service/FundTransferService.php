@@ -8,6 +8,7 @@ use App\Api\TransferResponse;
 use App\Entity\Account;
 use App\Entity\Transfer;
 use App\Exception\AccountNotFoundException;
+use App\Exception\IdempotencyKeyMismatchException;
 use App\Exception\InsufficientFundsException;
 use App\Exception\InvalidTransferException;
 use App\Repository\AccountRepository;
@@ -22,6 +23,9 @@ use Symfony\Component\Uid\Uuid;
 
 final class FundTransferService
 {
+    /** Maximum BIGINT UNSIGNED minor units stored in Doctrine string columns */
+    private const MAX_UNSIGNED_BIGINT = '18446744073709551615';
+
     public function __construct(
         private EntityManagerInterface $em,
         private AccountRepository $accounts,
@@ -38,6 +42,7 @@ final class FundTransferService
         string $toPublicId,
         string $amountMinor,
         ?string $idempotencyKey,
+        string $idempotencyOwner = '',
     ): TransferResponse {
         if ($fromPublicId === $toPublicId) {
             throw InvalidTransferException::sameAccount();
@@ -45,9 +50,14 @@ final class FundTransferService
         if (!self::isPositiveMinorAmount($amountMinor)) {
             throw InvalidTransferException::invalidAmount();
         }
+        if (bccomp($amountMinor, self::MAX_UNSIGNED_BIGINT, 0) > 0) {
+            throw InvalidTransferException::amountExceedsStorageLimit();
+        }
+
+        $idempotencyOwner = self::normalizeIdempotencyOwner($idempotencyOwner);
 
         if (null !== $idempotencyKey) {
-            $cached = $this->readIdempotencyCache($idempotencyKey);
+            $cached = $this->readIdempotencyCache($idempotencyOwner, $idempotencyKey, $fromPublicId, $toPublicId, $amountMinor);
             if (null !== $cached) {
                 return $cached;
             }
@@ -56,13 +66,17 @@ final class FundTransferService
         $this->em->beginTransaction();
         try {
             if (null !== $idempotencyKey) {
-                $existing = $this->transfers->findOneByIdempotencyKey($idempotencyKey);
+                $existing = $this->transfers->findOneByIdempotencyOwnerAndKey($idempotencyOwner, $idempotencyKey);
                 if (null !== $existing) {
+                    $stored = TransferResponse::fromEntity($existing);
+                    if (!TransferIdempotencyFingerprint::matchesResponse($stored, $fromPublicId, $toPublicId, $amountMinor)) {
+                        $this->em->rollback();
+                        throw IdempotencyKeyMismatchException::reusedWithDifferentPayload();
+                    }
                     $this->em->commit();
-                    $response = TransferResponse::fromEntity($existing);
-                    $this->writeIdempotencyCache($idempotencyKey, $response);
+                    $this->writeIdempotencyCache($idempotencyOwner, $idempotencyKey, $stored);
 
-                    return $response;
+                    return $stored;
                 }
             }
 
@@ -81,7 +95,7 @@ final class FundTransferService
             $first = $this->em->find(Account::class, $firstId, LockMode::PESSIMISTIC_WRITE);
             $second = $this->em->find(Account::class, $secondId, LockMode::PESSIMISTIC_WRITE);
             if (!$first instanceof Account || !$second instanceof Account) {
-                throw new \RuntimeException('Locked accounts missing after existence check.');
+                throw AccountNotFoundException::duringTransferLock();
             }
 
             $from = $fromId === $firstId ? $first : $second;
@@ -93,6 +107,9 @@ final class FundTransferService
 
             $newFrom = bcsub($from->getBalanceMinor(), $amountMinor, 0);
             $newTo = bcadd($to->getBalanceMinor(), $amountMinor, 0);
+            if (bccomp($newTo, self::MAX_UNSIGNED_BIGINT, 0) > 0) {
+                throw InvalidTransferException::balanceWouldOverflow();
+            }
             $from->setBalanceMinor($newFrom);
             $to->setBalanceMinor($newTo);
 
@@ -102,6 +119,7 @@ final class FundTransferService
                 $to,
                 $amountMinor,
                 $idempotencyKey,
+                $idempotencyOwner,
             );
             $this->em->persist($transfer);
             $this->em->flush();
@@ -112,12 +130,16 @@ final class FundTransferService
                 'from' => $from->getPublicId(),
                 'to' => $to->getPublicId(),
                 'amount_minor' => $amountMinor,
+                'idem_owner_hash_prefix' => '' === $idempotencyOwner ? '' : substr($idempotencyOwner, 0, 16),
             ]);
 
             $response = TransferResponse::fromEntity($transfer);
-            $this->balanceCache->invalidate($from->getPublicId(), $to->getPublicId());
+            $this->balanceCache->primeBalances([
+                $from->getPublicId() => $newFrom,
+                $to->getPublicId() => $newTo,
+            ]);
             if (null !== $idempotencyKey) {
-                $this->writeIdempotencyCache($idempotencyKey, $response);
+                $this->writeIdempotencyCache($idempotencyOwner, $idempotencyKey, $response);
             }
 
             return $response;
@@ -126,10 +148,14 @@ final class FundTransferService
 
             if (null !== $idempotencyKey) {
                 $this->em->clear();
-                $existing = $this->transfers->findOneByIdempotencyKey($idempotencyKey);
+                $existing = $this->transfers->findOneByIdempotencyOwnerAndKey($idempotencyOwner, $idempotencyKey);
                 if (null !== $existing) {
-                    $response = TransferResponse::fromEntity($existing);
-                    $this->writeIdempotencyCache($idempotencyKey, $response);
+                    $stored = TransferResponse::fromEntity($existing);
+                    if (!TransferIdempotencyFingerprint::matchesResponse($stored, $fromPublicId, $toPublicId, $amountMinor)) {
+                        throw IdempotencyKeyMismatchException::reusedWithDifferentPayload();
+                    }
+                    $response = $stored;
+                    $this->writeIdempotencyCache($idempotencyOwner, $idempotencyKey, $response);
 
                     return $response;
                 }
@@ -142,9 +168,14 @@ final class FundTransferService
         }
     }
 
-    private function readIdempotencyCache(string $idempotencyKey): ?TransferResponse
-    {
-        $item = $this->idempotency->getItem($this->idempotencyCacheKey($idempotencyKey));
+    private function readIdempotencyCache(
+        string $idempotencyOwner,
+        string $idempotencyKey,
+        string $fromPublicId,
+        string $toPublicId,
+        string $amountMinor,
+    ): ?TransferResponse {
+        $item = $this->idempotency->getItem($this->idempotencyCacheKey($idempotencyOwner, $idempotencyKey));
         if (!$item->isHit()) {
             return null;
         }
@@ -152,22 +183,39 @@ final class FundTransferService
         if (!\is_string($raw) || '' === $raw) {
             return null;
         }
+        /** @var array<string, mixed> $data */
         $data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        if (!isset($data['transferId'], $data['fromAccountId'], $data['toAccountId'], $data['amountMinor'], $data['createdAt'])) {
+            return null;
+        }
+        $stored = TransferResponse::fromArray($data);
+        if (!TransferIdempotencyFingerprint::matchesResponse($stored, $fromPublicId, $toPublicId, $amountMinor)) {
+            throw IdempotencyKeyMismatchException::reusedWithDifferentPayload();
+        }
 
-        return TransferResponse::fromArray($data);
+        return $stored;
     }
 
-    private function writeIdempotencyCache(string $idempotencyKey, TransferResponse $response): void
+    private function writeIdempotencyCache(string $idempotencyOwner, string $idempotencyKey, TransferResponse $response): void
     {
-        $item = $this->idempotency->getItem($this->idempotencyCacheKey($idempotencyKey));
+        $item = $this->idempotency->getItem($this->idempotencyCacheKey($idempotencyOwner, $idempotencyKey));
         $item->set(json_encode($response->toArray(), JSON_THROW_ON_ERROR));
         $item->expiresAfter(86400);
         $this->idempotency->save($item);
     }
 
-    private function idempotencyCacheKey(string $idempotencyKey): string
+    private function idempotencyCacheKey(string $idempotencyOwner, string $idempotencyKey): string
     {
-        return 'idem_'.hash('sha256', $idempotencyKey);
+        return 'idem_'.hash('sha256', $idempotencyOwner."\0".$idempotencyKey);
+    }
+
+    private static function normalizeIdempotencyOwner(string $owner): string
+    {
+        if ('' === $owner) {
+            return '';
+        }
+
+        return hash('sha256', $owner);
     }
 
     private function rollbackIfActive(): void

@@ -15,4 +15,14 @@ final class InvalidTransferException extends \DomainException
     {
         return new self('Amount must be a positive integer of minor units.');
     }
+
+    public static function amountExceedsStorageLimit(): self
+    {
+        return new self('amountMinor exceeds the maximum supported value for this system.');
+    }
+
+    public static function balanceWouldOverflow(): self
+    {
+        return new self('Transfer would exceed the maximum account balance.');
+    }
 }

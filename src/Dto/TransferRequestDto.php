@@ -17,6 +17,7 @@ final class TransferRequestDto
         public ?string $toAccountId = null,
         #[Assert\NotBlank(message: 'amountMinor is required.')]
         #[Assert\Regex(pattern: '/^[1-9][0-9]*$/', message: 'amountMinor must be a positive integer string of minor units.')]
+        #[Assert\Length(max: 20, maxMessage: 'amountMinor exceeds the maximum numeric width allowed.')]
         public ?string $amountMinor = null,
     ) {
     }

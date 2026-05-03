@@ -2,8 +2,15 @@
 framework:
     secret: '%env(APP_SECRET)%'
 
-    # Note that the session will be started ONLY if you read or write from it.
-    session: true
+    session: false
+
+    # Trust only the direct TCP client unless behind a trusted reverse proxy (see when@prod / when@test / when@dev).
+    trusted_proxies: 'REMOTE_ADDR'
+    trusted_headers:
+        - x-forwarded-for
+        - x-forwarded-proto
+        - x-forwarded-port
+        - x-forwarded-host
 
     # Writes: fixed window per client IP stored in Redis (see cache pool rate_limiter.transfer_write).
     rate_limiter:
@@ -13,13 +20,15 @@ framework:
             interval: '1 minute'
             cache_pool: rate_limiter.transfer_write
 
-    #esi: true
-    #fragments: true
+when@prod:
+    framework:
+        trusted_proxies: 'PRIVATE_SUBNETS'
 
 when@test:
     framework:
         test: true
         session:
+            enabled: true
             storage_factory_id: session.storage.factory.mock_file
         # Hard cap for integration tests (429 assertions). Production-like defaults use .env instead.
         rate_limiter:

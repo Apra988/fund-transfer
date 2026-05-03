@@ -53,16 +53,18 @@ This starts:
 
 ### 3. Configure environment
 
-`.env` defaults match `docker-compose.yml`. Override secrets in `.env.local` if needed.
+`.env` defaults match `docker-compose.yml`. Override secrets in `.env.local` if needed. A template (not loaded by Symfony) lives in **`env.local.example`** (`JWT_SECRET_KEY`, `PUBLIC_API_ALLOW_ANONYMOUS`, `API_KEY`).
 
 
-| Variable                    | Purpose                                                              |
-| --------------------------- | -------------------------------------------------------------------- |
-| `DATABASE_URL`              | MySQL DSN (see `.env`)                                               |
-| `REDIS_URL`                 | Redis DSN for caches and distributed rate-limit state (`redis://…`)  |
-| `TRANSFER_WRITE_RATE_LIMIT` | Max `POST /api/transfers` per client IP per minute (default **200**) |
-| `API_KEY`                   | Optional; when set, require header `X-API-Key`                       |
-| `APP_SECRET`                | Symfony secret (change in production)                                |
+| Variable                      | Purpose                                                                 |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `DATABASE_URL`                | MySQL DSN (see `.env`)                                                   |
+| `REDIS_URL`                   | Redis DSN for caches and distributed rate-limit state (`redis://…`)     |
+| `TRANSFER_WRITE_RATE_LIMIT`   | Max `POST /api/transfers` per client IP per minute (default **200**)    |
+| `JWT_SECRET_KEY`              | HS256 secret (≥32 chars). When set → `Authorization: Bearer <jwt>` required (with claims `sub`; optional array `roles`) |
+| `API_KEY`                     | When non-empty → `X-API-Key` accepted as alternative to JWT               |
+| `PUBLIC_API_ALLOW_ANONYMOUS`  | When `JWT_SECRET_KEY` **and** `API_KEY` are set: if `1`, missing auth still allowed (avoid in prod); if `0`, credentials required |
+| `APP_SECRET`                  | Symfony secret (change in production)                                  |
 
 
 ### 4. Run migrations
@@ -97,6 +99,10 @@ Base URL: `http://127.0.0.1:8000` (when using the PHP built-in server above).
 
 Liveness check.
 
+### `GET /api/me`
+
+Returns the **resolved API principal** for this request (`subject` plus `roles`): e.g. `anonymous` when `PUBLIC_API_ALLOW_ANONYMOUS=1` with no credentials, or the JWT **`sub`** claim when a valid `Authorization: Bearer` token is sent. Use it to **verify** auth during demos (pair with `PUBLIC_API_ALLOW_ANONYMOUS=0` to see **401** without a token).
+
 ### `GET /api/accounts/{uuid}`
 
 Returns `accountId` and `balanceMinor` (string integer). Balance reads use Redis with a short TTL and are invalidated after transfers.
@@ -116,7 +122,7 @@ Request JSON:
 Headers:
 
 - `Content-Type: application/json`
-- `Idempotency-Key` (optional, max 255 chars): same key + body replays the original transfer result without double-posting.
+- `Idempotency-Key` (optional, max 255 chars): same key + **identical** JSON body replays the original **201** response; reusing the key with a **different** body returns **409 Conflict** (Stripe-style).
 
 Responses use **201 Created** with:
 
@@ -130,29 +136,45 @@ Responses use **201 Created** with:
 }
 ```
 
-Validation and domain errors return JSON with `errors` or `error` and HTTP status codes such as **400**, **404**, **422**, and **429**.
+Validation and domain errors return JSON with `errors` or `error` and HTTP status codes such as **400**, **401**, **404**, **409**, **422**, and **429**.
+
+### Authentication (Symfony Security)
+
+All `/api/*` routes except **`GET /api/health`** require the **`ROLE_TRANSFER`** role via **`symfony/security-bundle`**:
+
+- **Neither** `JWT_SECRET_KEY` **nor** `API_KEY` set (default local dev): API is open; requests run as pseudo-user `anonymous`.
+- **`JWT_SECRET_KEY` set** (min 32 characters): send `Authorization: Bearer <token>` (`HS256`, must include **`sub`**; optional JWT claim **`roles`** as string array mapped to Symfony `ROLE_*`).
+- **`API_KEY` set**: send **`X-API-Key`** (same value as env). JWT is tried first if a `Bearer` token is present.
+
+Issue a test token (needs `JWT_SECRET_KEY` configured):
+
+```bash
+php bin/console app:security:issue-token client-tenant-1 --ttl=7200
+```
+
+**Idempotency** keys are scoped to the authenticated **`sub`** / API-key client id / `anonymous`, so two callers cannot collide on the same visible `Idempotency-Key` string.
+
+### Transport & proxies (production)
+
+- In **`prod`**, the **`api` firewall requires HTTPS** (`requires_channel: https`). Terminate TLS at your load balancer and set **`X-Forwarded-Proto: https`**; `when@prod` enables **`trusted_proxies: PRIVATE_SUBNETS`** and common forwarded headers so **`Request::getClientIp()`** and scheme checks work behind a reverse proxy.
+
+### Security headers
+
+API responses add **`X-Content-Type-Options: nosniff`**, **`X-Frame-Options: DENY`**, and **`Referrer-Policy: no-referrer`**.
 
 ### Rate limiting
 
 `POST /api/transfers` uses a **fixed window** (`TRANSFER_WRITE_RATE_LIMIT` hits per client IP per minute). Limiter state is stored in Redis (`rate_limiter.transfer_write`), so quotas stay coherent across multiple app replicas.
 
-In `**test`**, the limit is lower (see `config/packages/framework.yaml`) so integration tests can assert **429**. Those tests rely on Redis staying up so counters survive sequential sub-requests inside one test method.
-
-### Optional API key
-
-If `API_KEY` is non-empty, every `/api/`* route except `GET /api/health` requires:
-
-```http
-X-API-Key: <your-key>
-```
+In **test**, the limit is lower (see `config/packages/framework.yaml`) so integration tests can assert **429**. Those tests rely on Redis staying up so counters survive sequential sub-requests inside one test method.
 
 ---
 
 ## Design choices
 
-- Amounts use **minor units as strings** and `**bcmath`** to avoid floating-point mistakes.
+- Amounts use **minor units as strings** and **bcmath** to avoid floating-point mistakes.
 - Transfers run in a **single DB transaction** with **pessimistic row locks** on both accounts in **deterministic order** (lower internal id first) to reduce deadlocks.
-- **Idempotency**: unique `idempotency_key` at the persistence layer plus Redis caching for faster replays when the optional header is supplied.
+- **Idempotency**: unique **(caller, key)** composite at the persistence layer plus Redis caching; optional `Idempotency-Key` header is scoped per authenticated subject.
 - **Reads under load**: short-TTL Redis cache for account balances with invalidation after successful transfers.
 - **Indexes**: e.g. `transfer.created_at` for time-window queries (`migrations/Version20260202120000`).
 
@@ -177,14 +199,24 @@ Run tests:
 
 ```bash
 composer test
-# or: php vendor/bin/phpunit
+```
+
+This runs **two** PHPUnit passes: `phpunit.xml.dist` (the main suite, which excludes the `@jwt-integration` group) and **`phpunit.jwt-required.xml.dist`**, which sets a non-empty `JWT_SECRET_KEY` and `PUBLIC_API_ALLOW_ANONYMOUS=0` so protected routes behave like production credentials.
+
+Alternatively:
+
+```bash
+php vendor/bin/phpunit                              # default suite only
+php vendor/bin/phpunit -c phpunit.jwt-required.xml.dist
 ```
 
 Requirements:
 
-- **MySQL**: `DATABASE_URL` in `.env.test` must use base database name `**app`**; Symfony’s `dbname_suffix` in `test` yields `**app_test`**.
+- **MySQL**: `DATABASE_URL` in `.env.test` must use base database name **app**; Symfony’s `dbname_suffix` in `test` yields **app_test**.
 - **Redis**: tests that assert POST rate limiting need Redis (`docker compose up -d redis`).
 - **DAMA Doctrine Test Bundle** wraps integration tests in a transaction when possible.
+
+**Security**: `.env.test` keeps **JWT / API key unset** so the main application integration tests behave like permissive dev (anonymous `ROLE_TRANSFER`). **`ApiTokenAuthenticator`** is covered by unit tests under `tests/Security/`; JWT-required endpoints are exercised by `JwtRequiredFundTransferApiTest` in the second pass above.
 
 ---
 

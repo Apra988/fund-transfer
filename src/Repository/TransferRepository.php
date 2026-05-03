@@ -18,8 +18,11 @@ class TransferRepository extends ServiceEntityRepository
         parent::__construct($registry, Transfer::class);
     }
 
-    public function findOneByIdempotencyKey(string $key): ?Transfer
+    public function findOneByIdempotencyOwnerAndKey(string $owner, string $key): ?Transfer
     {
-        return $this->findOneBy(['idempotencyKey' => $key]);
+        return $this->findOneBy([
+            'idempotencyOwner' => $owner,
+            'idempotencyKey' => $key,
+        ]);
     }
 }

@@ -9,7 +9,12 @@ use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity(repositoryClass: TransferRepository::class)]
-#[ORM\Table(name: 'transfer')]
+#[ORM\Table(
+    name: 'transfer',
+    uniqueConstraints: [
+        new ORM\UniqueConstraint(name: 'UNIQ_TRANSFER_IDEMP_OWNER_KEY', columns: ['idempotency_owner', 'idempotency_key']),
+    ],
+)]
 class Transfer
 {
     #[ORM\Id]
@@ -31,7 +36,10 @@ class Transfer
     #[ORM\Column(type: Types::BIGINT, options: ['unsigned' => true])]
     private string $amountMinor;
 
-    #[ORM\Column(length: 255, nullable: true, unique: true)]
+    #[ORM\Column(length: 128, options: ['default' => ''])]
+    private string $idempotencyOwner = '';
+
+    #[ORM\Column(length: 255, nullable: true)]
     private ?string $idempotencyKey = null;
 
     #[ORM\Column(type: Types::DATETIME_IMMUTABLE)]
@@ -43,12 +51,14 @@ class Transfer
         Account $toAccount,
         string $amountMinor,
         ?string $idempotencyKey,
+        string $idempotencyOwner = '',
     ) {
         $this->publicId = $publicId;
         $this->fromAccount = $fromAccount;
         $this->toAccount = $toAccount;
         $this->amountMinor = $amountMinor;
         $this->idempotencyKey = $idempotencyKey;
+        $this->idempotencyOwner = $idempotencyOwner;
         $this->createdAt = new \DateTimeImmutable();
     }
 
@@ -80,6 +90,11 @@ class Transfer
     public function getIdempotencyKey(): ?string
     {
         return $this->idempotencyKey;
+    }
+
+    public function getIdempotencyOwner(): string
+    {
+        return $this->idempotencyOwner;
     }
 
     public function getCreatedAt(): \DateTimeImmutable

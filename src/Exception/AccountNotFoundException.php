@@ -10,4 +10,9 @@ final class AccountNotFoundException extends \DomainException
     {
         return new self(sprintf('Account not found: %s', $publicId));
     }
+
+    public static function duringTransferLock(): self
+    {
+        return new self('Account not found.');
+    }
 }
