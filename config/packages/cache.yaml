@@ -1,0 +1,36 @@
+framework:
+    cache:
+        prefix_seed: fund_transfer_api
+
+        app: cache.adapter.redis
+        default_redis_provider: '%env(REDIS_URL)%'
+
+        pools:
+            idempotency.cache:
+                adapter: cache.adapter.redis
+                default_lifetime: 86400
+            account.cache:
+                adapter: cache.adapter.redis
+                default_lifetime: 60
+            # Dedicated pool for POST /api/transfers rate limit state (distributed via Redis across app replicas).
+            rate_limiter.transfer_write:
+                adapter: cache.adapter.redis
+                default_lifetime: 120
+
+when@test:
+    framework:
+        cache:
+            app: cache.adapter.array
+            default_redis_provider: '%env(REDIS_URL)%'
+            pools:
+                idempotency.cache:
+                    adapter: cache.adapter.array
+                    default_lifetime: 86400
+                account.cache:
+                    adapter: cache.adapter.array
+                    default_lifetime: 60
+                # Redis (not array): BrowserKit resets in-memory caches between sub-requests, which would
+                # clear a fixed-window limiter and make 429 impossible to assert in integration tests.
+                rate_limiter.transfer_write:
+                    adapter: cache.adapter.redis
+                    default_lifetime: 120
